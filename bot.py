@@ -2,6 +2,7 @@ import requests
 import json
 import os
 import time
+import random
 
 # ===== تنظیمات خودت =====
 TOKEN = "8956012435:AAG8yJA3E6PouLB0hmmw7rpXzAX_flnvqRc"
@@ -9,6 +10,23 @@ TOKEN = "8956012435:AAG8yJA3E6PouLB0hmmw7rpXzAX_flnvqRc"
 
 BASE = f"https://api.telegram.org/bot{TOKEN}"
 STATE_FILE = "state.json"
+
+# لیستی از پروکسی‌های رایگان ایرانی (HTTP/HTTPS)
+# این لیست از منابع عمومی استخراج شده و ممکن است ناپایدار باشد.
+IRAN_PROXIES = [
+    "http://46.209.30.11:8080",
+    "http://45.131.4.93:80",
+    "http://45.131.4.91:80",
+    "http://81.12.28.35:3128",
+    "http://185.88.177.40:80",
+    "http://46.245.69.173:8080",
+    "http://45.131.4.67:80",
+    "http://185.95.152.38:8080",
+    "http://31.14.124.45:8080",
+    "http://195.181.40.34:8080",
+    "http://185.118.153.110:8080",
+    "http://79.175.188.203:443",
+]
 
 HEADERS = {
     'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 '
@@ -48,7 +66,8 @@ MAIN_KEYBOARD = {
     'is_persistent': True
 }
 
-def get_symbol_list(retries=3):
+def get_symbol_list(retries=5):
+    """دریافت لیست نمادها با تلاش از طریق پروکسی‌های مختلف."""
     url = "https://cdn.tsetmc.com/api/ClosingPrice/GetMarketWatch"
     params = {
         'market': 0,
@@ -59,23 +78,43 @@ def get_symbol_list(retries=3):
         'hEven': 0,
         'RefID': 0
     }
+    
+    # اگر لیست پروکسی خالی بود، حداقل یک بار بدون پروکسی تلاش کن
+    proxies_to_try = IRAN_PROXIES if IRAN_PROXIES else [None]
+    
     for attempt in range(retries):
+        # انتخاب تصادفی یک پروکسی برای هر تلاش
+        proxy_url = random.choice(proxies_to_try)
+        proxies = {"http": proxy_url, "https": proxy_url} if proxy_url else None
+        
+        print(f"تلاش {attempt+1} با پروکسی: {proxy_url}")
+        
         try:
-            r = requests.get(url, params=params, headers=HEADERS, timeout=20)
+            r = requests.get(url, params=params, headers=HEADERS,
+                             proxies=proxies, timeout=20)
             if r.status_code != 200:
-                print(f"تلاش {attempt+1}: خطای HTTP {r.status_code}")
-                time.sleep(2)
+                print(f"خطای HTTP: {r.status_code}")
+                time.sleep(1)
                 continue
+            
             data = r.json()
             items = data.get('marketwatch') or data.get('marketWatch')
             if not items:
-                print(f"تلاش {attempt+1}: پاسخ خالی")
-                time.sleep(2)
+                print("پاسخ خالی بود")
+                time.sleep(1)
                 continue
+            
+            # اگر موفق شدیم، لیست را برگردان
+            print(f"موفق شدیم با پروکسی: {proxy_url}")
             return items
+            
         except Exception as e:
-            print(f"تلاش {attempt+1}: خطا - {e}")
-            time.sleep(2)
+            print(f"خطا با پروکسی {proxy_url}: {e}")
+            time.sleep(1)
+            continue
+    
+    # اگر همه تلاش‌ها ناموفق بود
+    print("همه تلاش‌ها ناموفق بود.")
     return None
 
 def format_symbol_list(items, limit=40):
@@ -135,7 +174,7 @@ try:
         elif text == '📊 اسکن':
             send(chat_id, "بخش اسکن هنوز آماده نیست.", MAIN_KEYBOARD)
         elif text == '📋 لیست نمادها':
-            send(chat_id, "⏳ در حال دریافت لیست نمادها...", MAIN_KEYBOARD)
+            send(chat_id, "⏳ در حال دریافت لیست نمادها (ممکن است کمی طول بکشد)...", MAIN_KEYBOARD)
             items = get_symbol_list()
             if items:
                 msg_text = format_symbol_list(items)
@@ -144,7 +183,7 @@ try:
                 else:
                     send(chat_id, "لیست دریافت شد اما نام نمادها استخراج نشد.", MAIN_KEYBOARD)
             else:
-                send(chat_id, "❌ دریافت لیست ناموفق بود.", MAIN_KEYBOARD)
+                send(chat_id, "❌ دریافت لیست ناموفق بود. لطفاً دوباره تلاش کنید.", MAIN_KEYBOARD)
         else:
             send(chat_id, "از منوی پایین انتخاب کن:", MAIN_KEYBOARD)
 
