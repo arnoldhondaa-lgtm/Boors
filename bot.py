@@ -18,6 +18,25 @@ HEADERS = {
     'Accept': 'application/json, text/plain, */*',
 }
 
+# کیبوردهای ربات
+MAIN_KEYBOARD = {
+    'keyboard': [
+        [{'text': '📊 اسکن'}, {'text': '📋 لیست نمادها'}],
+        [{'text': '⚙️ تنظیمات'}]
+    ],
+    'resize_keyboard': True,
+    'is_persistent': True
+}
+
+SETTINGS_KEYBOARD = {
+    'keyboard': [
+        [{'text': '🔔 افزودن هشدار'}, {'text': '📋 لیست هشدارها'}],
+        [{'text': '🔙 بازگشت به منوی اصلی'}]
+    ],
+    'resize_keyboard': True,
+    'is_persistent': True
+}
+
 def load_state():
     if os.path.exists(STATE_FILE):
         try:
@@ -40,18 +59,8 @@ def send(chat_id, text, keyboard=None):
     except Exception as e:
         print("خطا در ارسال:", e)
 
-MAIN_KEYBOARD = {
-    'keyboard': [
-        [{'text': '📊 اسکن'}, {'text': '📋 لیست نمادها'}],
-        [{'text': '⚙️ تنظیمات'}]
-    ],
-    'resize_keyboard': True,
-    'is_persistent': True
-}
-
-# ====== موتور دریافت داده با اولویت‌دهی هوشمند ======
+# ====== موتور دریافت داده ======
 def fetch_json(url, params=None):
-    # ۱. اولویت اول: استفاده از r.jina.ai (پروکسی پایدار برای APIهای خارجی)
     try:
         full_url = url
         if params:
@@ -59,106 +68,61 @@ def fetch_json(url, params=None):
         jina_url = f"https://r.jina.ai/{full_url}"
         r = requests.get(jina_url, headers={'Accept': 'application/json'}, timeout=15)
         if r.status_code == 200:
-            # jina ممکن است متن اضافی برگرداند، سعی میکنیم JSON را استخراج کنیم
             text = r.text.strip()
             if text.startswith('{') or text.startswith('['):
                 return json.loads(text)
-            # اگر JSON نبود، شاید داخل متن باشد
             start = text.find('{')
             end = text.rfind('}')
             if start != -1 and end != -1:
                 return json.loads(text[start:end+1])
-    except Exception as e:
-        print("Jina failed:", e)
+    except Exception:
+        pass
 
-    # ۲. اولویت دوم: اتصال مستقیم (شاید IP گیت‌هاب در آن لحظه مسدود نباشد)
     try:
         r = requests.get(url, params=params, headers=HEADERS, timeout=10)
         if r.status_code == 200:
             return r.json()
-    except Exception as e:
-        print("Direct failed:", e)
-
-    # ۳. اولویت سوم: پروکسی‌های CORS
-    full_url = url
-    if params:
-        full_url += "?" + urlencode(params)
-    quoted_url = quote(full_url, safe='')
-    cors_proxies = [
-        f"https://api.allorigins.win/raw?url={quoted_url}",
-        f"https://api.codetabs.com/v1/proxy?quest={quoted_url}"
-    ]
-    for proxy_url in cors_proxies:
-        try:
-            r = requests.get(proxy_url, timeout=15)
-            if r.status_code == 200:
-                return r.json()
-        except Exception:
-            pass
-
-    # ۴. اولویت چهارم: پروکسی‌های ایرانی
-    try:
-        proxy_api = "https://api.proxyscrape.com/v2/?request=displayproxies&protocol=http&timeout=5000&country=IR&ssl=all&anonymity=all"
-        r = requests.get(proxy_api, timeout=5)
-        if r.status_code == 200:
-            proxies = [f"http://{p.strip()}" for p in r.text.split("\n") if p.strip()]
-            random.shuffle(proxies)
-            for p in proxies[:3]: 
-                try:
-                    r_data = requests.get(url, params=params, headers=HEADERS, 
-                                          proxies={"http": p, "https": p}, timeout=8)
-                    if r_data.status_code == 200:
-                        return r_data.json()
-                except Exception:
-                    continue
     except Exception:
         pass
-
     return None
 
-def search_and_get_price(query):
-    # ۱. جستجوی نماد
+def get_symbol_info_and_price(query):
     search_url = f"https://cdn.tsetmc.com/api/Instrument/GetInstrumentSearch/{quote(query)}"
     search_data = fetch_json(search_url)
-    
     if not search_data or 'instrumentSearch' not in search_data:
-        return None, "سرور بورس پاسخ نداد یا نماد پیدا نشد."
+        return None, None
     
     items = search_data['instrumentSearch']
     if not items:
-        return None, f"نمادی با عبارت «{query}» یافت نشد."
+        return None, None
     
-    # پیدا کردن دقیق‌ترین تطابق
     exact_match = None
     for item in items:
-        # گاهی اوقات فاصله یا کاراکترهای اضافی وجود دارد، تمیز میکنیم
-        symbol_db = item.get('lVal18AFC', '').strip().replace('ي', 'ی').replace('ك', 'ک')
-        symbol_user = query.strip().replace('ي', 'ی').replace('ك', 'ک')
-        
-        if symbol_db == symbol_user:
+        if item.get('lVal18AFC', '').strip().replace('ي', 'ی').replace('ك', 'ک') == query.strip().replace('ي', 'ی').replace('ك', 'ک'):
             exact_match = item
             break
-            
     if not exact_match:
-        # اگر دقیق نبود، اولین نتیجه رو بردار (بهترین تطابق تقریبی)
         exact_match = items[0]
         
     ins_code = exact_match.get('insCode')
-    
-    # ۲. دریافت قیمت لحظه‌ای
     price_url = f"https://cdn.tsetmc.com/api/ClosingPrice/GetClosingPriceInfo/{ins_code}"
     price_data = fetch_json(price_url)
-    
     if not price_data or 'closingPriceInfo' not in price_data:
-        return None, "اطلاعات قیمت برای این نماد در دسترس نیست."
+        return None, None
         
-    return (exact_match, price_data['closingPriceInfo']), None
+    return exact_match, price_data['closingPriceInfo']
 
 # ========== اجرای اصلی ==========
 state = load_state()
 offset = state.get("offset", 0)
+alerts = state.get("alerts", [])
+# حالت‌های انتظار
 awaiting_scan = state.get("awaiting_scan", False)
+awaiting_alert_sym = state.get("awaiting_alert_sym", False)
+awaiting_alert_price = state.get("awaiting_alert_price", False)
+temp_alert_sym = state.get("temp_alert_sym", "")
 
+# اگر اولین اجراست
 if offset == 0 and not os.path.exists(STATE_FILE):
     try:
         r = requests.get(f"{BASE}/getUpdates", timeout=15)
@@ -166,9 +130,43 @@ if offset == 0 and not os.path.exists(STATE_FILE):
         offset = (max(u['update_id'] for u in updates) + 1) if updates else 0
     except Exception:
         pass
-    save_state({"offset": offset, "awaiting_scan": False})
+    save_state({"offset": offset, "alerts": []})
     exit(0)
 
+# ---------- ۱. بررسی هشدارهای فعال ----------
+if alerts:
+    print(f"بررسی {len(alerts)} هشدار...")
+    remaining_alerts = []
+    for alert in alerts:
+        sym = alert.get("symbol")
+        target = alert.get("target")
+        chat_id = alert.get("chat_id")
+        
+        info, price = get_symbol_info_and_price(sym)
+        if price:
+            current_price = price.get('pDrCotVal', 0)
+            print(f"نماد {sym}: قیمت فعلی {current_price} - هدف {target}")
+            
+            if current_price >= target:
+                msg = f"🚨 **هشدار قیمت!**\n\n"
+                msg += f"نماد: {sym}\n"
+                msg += f"قیمت هدف شما: {target:,} ریال\n"
+                msg += f"قیمت فعلی: {current_price:,} ریال\n"
+                msg += f"این هشدار از لیست شما حذف شد."
+                send(chat_id, msg, MAIN_KEYBOARD)
+                # هشدار مصرف شده و به لیست باقی‌مانده اضافه نمی‌شود
+            else:
+                remaining_alerts.append(alert)
+        else:
+            # اگر در دریافت قیمت خطا داد، هشدار را نگه میداریم برای دفعه بعد
+            remaining_alerts.append(alert)
+            
+    if len(remaining_alerts) != len(alerts):
+        alerts = remaining_alerts
+        state["alerts"] = alerts
+        save_state(state)
+
+# ---------- ۲. دریافت پیام‌های تلگرام ----------
 try:
     r = requests.get(f"{BASE}/getUpdates", params={'offset': offset, 'timeout': 5}, timeout=20)
     updates = r.json().get('result', [])
@@ -181,67 +179,97 @@ try:
         chat_id = msg['chat']['id']
         text = msg.get('text', '').strip()
 
+        # --- حالت‌های انتظار برای ورودی کاربر ---
         if awaiting_scan:
             send(chat_id, f"⏳ در حال جستجوی نماد «{text}»...", MAIN_KEYBOARD)
-            
-            result, error = search_and_get_price(text)
-            
-            if result:
-                info, price = result
-                msg_text = f"📊 نماد: {info.get('lVal18AFC')}\n"
-                msg_text += f"🏢 {info.get('lVal30')}\n\n"
+            info, price = get_symbol_info_and_price(text)
+            if info and price:
+                msg_text = f"📊 نماد: {info.get('lVal18AFC')}\n🏢 {info.get('lVal30')}\n\n"
                 msg_text += f"💰 آخرین معامله: {price.get('pDrCotVal', 0):,} ریال\n"
-                msg_text += f"🔒 قیمت پایانی: {price.get('pClosing', 0):,} ریال\n"
-                msg_text += f"📈 بیشترین: {price.get('priceMax', 0):,}\n"
-                msg_text += f"📉 کمترین: {price.get('priceMin', 0):,}\n"
-                msg_text += f"📦 حجم معاملات: {price.get('qTotTran5J', 0):,}"
+                msg_text += f"🔒 قیمت پایانی: {price.get('pClosing', 0):,} ریال"
                 send(chat_id, msg_text, MAIN_KEYBOARD)
             else:
-                # اگر نماد پیدا نشد، چند پیشنهاد از نتایج جستجو را نشان بده (اگر وجود داشته باشد)
-                search_url = f"https://cdn.tsetmc.com/api/Instrument/GetInstrumentSearch/{quote(text)}"
-                search_data = fetch_json(search_url)
-                suggestions = ""
-                if search_data and search_data.get('instrumentSearch'):
-                    sugg_items = search_data['instrumentSearch'][:5]
-                    sugg_list = [f"• {s.get('lVal18AFC')}" for s in sugg_items]
-                    suggestions = "\n\n💡 نمادهای مشابه:\n" + "\n".join(sugg_list)
-                
-                send(chat_id, f"❌ {error}{suggestions}", MAIN_KEYBOARD)
-            
+                send(chat_id, f"❌ نماد پیدا نشد یا خطای شبکه.", MAIN_KEYBOARD)
             awaiting_scan = False 
             continue
 
+        if awaiting_alert_sym:
+            info, price = get_symbol_info_and_price(text)
+            if info:
+                temp_alert_sym = info.get('lVal18AFC')
+                send(chat_id, f"✅ نماد {temp_alert_sym} انتخاب شد.\nحالا قیمت هدف را به ریال بنویسید (فقط عدد):", MAIN_KEYBOARD)
+                awaiting_alert_sym = False
+                awaiting_alert_price = True
+            else:
+                send(chat_id, "❌ نماد پیدا نشد. نام نماد را دقیق بنویسید:", MAIN_KEYBOARD)
+            continue
+
+        if awaiting_alert_price:
+            try:
+                target = int(text.replace(',', ''))
+                alerts.append({"symbol": temp_alert_sym, "target": target, "chat_id": chat_id})
+                state["alerts"] = alerts
+                send(chat_id, f"✅ هشدار ثبت شد!\nهر ۵ دقیقه چک می‌کنم، اگر {temp_alert_sym} به {target:,} ریال برسد بهت خبر می‌دم.", MAIN_KEYBOARD)
+            except ValueError:
+                send(chat_id, "❌ لطفاً فقط عدد بنویسید (مثلاً 45000).", MAIN_KEYBOARD)
+                continue
+            
+            awaiting_alert_price = False
+            temp_alert_sym = ""
+            continue
+
+        # --- پردازش دکمه‌های منو ---
         if text == '/start':
             send(chat_id, "سلام 👋\nاز منوی پایین یک گزینه انتخاب کن:", MAIN_KEYBOARD)
             
         elif text == '⚙️ تنظیمات':
-            send(chat_id, "بخش تنظیمات هنوز آماده نیست.", MAIN_KEYBOARD)
+            send(chat_id, "به بخش تنظیمات خوش آمدید. چه کاری می‌خواهید انجام دهید؟", SETTINGS_KEYBOARD)
+            
+        elif text == '🔙 بازگشت به منوی اصلی':
+            send(chat_id, "به منوی اصلی برگشتید.", MAIN_KEYBOARD)
+            
+        elif text == '🔔 افزودن هشدار':
+            send(chat_id, "🔍 نام نماد مورد نظر برای هشدار را بنویسید (مثلاً: خودرو یا ضهرم8024):", MAIN_KEYBOARD)
+            awaiting_alert_sym = True
+            awaiting_alert_price = False
+            
+        elif text == '📋 لیست هشدارها':
+            if not alerts:
+                send(chat_id, "شما هیچ هشدار فعالی ندارید.", SETTINGS_KEYBOARD)
+            else:
+                msg = "📋 هشدارهای فعال شما:\n\n"
+                for i, a in enumerate(alerts, 1):
+                    msg += f"{i}. {a['symbol']} -> بالای {a['target']:,} ریال\n"
+                send(chat_id, msg, SETTINGS_KEYBOARD)
             
         elif text == '📊 اسکن':
-            send(chat_id, "🔍 لطفاً نام نماد مورد نظر را بنویسید (مثلاً: خودرو یا ضهرم8024):", MAIN_KEYBOARD)
+            send(chat_id, "🔍 لطفاً نام نماد مورد نظر را بنویسید:", MAIN_KEYBOARD)
             awaiting_scan = True
             
         elif text == '📋 لیست نمادها':
             send(chat_id, "⏳ در حال دریافت لیست نمادها...", MAIN_KEYBOARD)
             list_url = "https://cdn.tsetmc.com/api/ClosingPrice/GetMarketWatch"
-            params = {'market': 0, 'paperTypes[0]': 1, 'paperTypes[1]': 2, 'paperTypes[2]': 3, 'withBestLimits': 'false', 'hEven': 0}
+            params = {'market': 0, 'paperTypes[0]': 1, 'withBestLimits': 'false', 'hEven': 0}
             data = fetch_json(list_url, params=params)
-            
-            if data:
-                items = data.get('marketwatch') or data.get('marketWatch')
-                if items:
-                    lines = []
-                    for it in items[:20]: 
-                        lines.append(f"• {it.get('lva')} — {it.get('lvc')}")
-                    send(chat_id, "📋 ۲۰ نماد اول بازار:\n\n" + "\n".join(lines), MAIN_KEYBOARD)
-                else:
-                    send(chat_id, "❌ داده‌ای دریافت نشد.", MAIN_KEYBOARD)
+            if data and data.get('marketwatch'):
+                items = data['marketwatch'][:20]
+                lines = [f"• {it.get('lva')} — {it.get('lvc')}" for it in items]
+                send(chat_id, "📋 ۲۰ نماد اول بازار:\n\n" + "\n".join(lines), MAIN_KEYBOARD)
             else:
-                send(chat_id, "❌ سرورهای بورس پاسخ ندادند. لطفاً بعداً تلاش کنید.", MAIN_KEYBOARD)
+                send(chat_id, "❌ سرورهای بورس پاسخ ندادند.", MAIN_KEYBOARD)
         else:
             send(chat_id, "از منوی پایین انتخاب کن:", MAIN_KEYBOARD)
 
-    save_state({"offset": offset, "awaiting_scan": awaiting_scan})
+    # ذخیره وضعیت نهایی
+    state.update({
+        "offset": offset, 
+        "alerts": alerts,
+        "awaiting_scan": awaiting_scan,
+        "awaiting_alert_sym": awaiting_alert_sym,
+        "awaiting_alert_price": awaiting_alert_price,
+        "temp_alert_sym": temp_alert_sym
+    })
+    save_state(state)
 
 except Exception as e:
     print("خطای کلی:", e)
