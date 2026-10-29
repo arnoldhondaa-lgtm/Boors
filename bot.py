@@ -2,6 +2,7 @@ import requests
 import json
 import os
 import time
+import random
 
 # ===== تنظیمات خودت =====
 TOKEN = "8956012435:AAG8yJA3E6PouLB0hmmw7rpXzAX_flnvqRc"
@@ -48,18 +49,36 @@ MAIN_KEYBOARD = {
 }
 
 def get_fresh_proxies():
+    proxies_list = []
     try:
+        # گرفتن لیست از منبع اول
         url = "https://api.proxyscrape.com/v2/?request=displayproxies&protocol=http&timeout=5000&country=IR&ssl=all&anonymity=all"
         r = requests.get(url, timeout=10)
         if r.status_code == 200:
-            proxies = [f"http://{p.strip()}" for p in r.text.split("\n") if p.strip()]
-            if proxies:
-                return proxies
-    except Exception:
-        pass
-    return ["http://46.209.30.11:8080", "http://45.131.4.93:80", "http://81.12.28.35:3128"]
+            proxies_list.extend([f"http://{p.strip()}" for p in r.text.split("\n") if p.strip()])
+            
+        # گرفتن لیست از منبع دوم برای اطمینان بیشتر
+        url2 = "https://raw.githubusercontent.com/TheSpeedX/PROXY-List/master/http.txt"
+        r2 = requests.get(url2, timeout=10)
+        if r2.status_code == 200:
+            # فقط چندتایی از این لیست برمیداریم که خیلی طولانی نشه
+            proxies_list.extend([f"http://{p.strip()}" for p in r2.text.split("\n")[:100] if p.strip()])
+            
+    except Exception as e:
+        print("خطا در دریافت پروکسی‌های آنلاین:", e)
+    
+    # لیست پیش‌فرض در صورتی که اینترنت قطع باشد
+    if not proxies_list:
+        proxies_list = [
+            "http://46.209.30.11:8080", "http://45.131.4.93:80",
+            "http://45.131.4.91:80", "http://81.12.28.35:3128",
+        ]
+        
+    # مخلوط کردن لیست تا هر بار ترتیب متفاوتی تست شود
+    random.shuffle(proxies_list)
+    return proxies_list
 
-def get_symbol_list(retries=10):
+def get_symbol_list(retries=15):
     url = "https://cdn.tsetmc.com/api/ClosingPrice/GetMarketWatch"
     params = {
         'market': 0,
@@ -70,19 +89,25 @@ def get_symbol_list(retries=10):
     }
     
     proxies_to_try = get_fresh_proxies()
+    # در نهایت یک بار هم بدون پروکسی (اتصال مستقیم) تست میکنیم
+    proxies_to_try.append(None) 
+    
     for attempt in range(min(retries, len(proxies_to_try))):
         proxy_url = proxies_to_try[attempt]
         proxies = {"http": proxy_url, "https": proxy_url} if proxy_url else None
+        
         try:
-            r = requests.get(url, params=params, headers=HEADERS, proxies=proxies, timeout=15)
-            if r.status_code != 200:
-                continue
-            data = r.json()
-            items = data.get('marketwatch') or data.get('marketWatch')
-            if items:
-                return items
+            print(f"تلاش {attempt+1} با پروکسی: {proxy_url}")
+            r = requests.get(url, params=params, headers=HEADERS, proxies=proxies, timeout=10)
+            if r.status_code == 200:
+                data = r.json()
+                items = data.get('marketwatch') or data.get('marketWatch')
+                if items:
+                    print("موفق! لیست دریافت شد.")
+                    return items
         except Exception:
             continue
+            
     return None
 
 def format_symbol_list(items, limit=30):
@@ -102,7 +127,6 @@ offset = state.get("offset", 0)
 awaiting_scan = state.get("awaiting_scan", False)
 
 if offset == 0 and not os.path.exists(STATE_FILE):
-    # اجرای اول
     try:
         r = requests.get(f"{BASE}/getUpdates", timeout=15)
         updates = r.json().get('result', [])
@@ -124,10 +148,10 @@ try:
         chat_id = msg['chat']['id']
         text = msg.get('text', '').strip()
 
-        # اگر منتظر دریافت نام نماد برای اسکن هستیم
         if awaiting_scan:
             send(chat_id, f"⏳ در حال جستجوی نماد «{text}»...", MAIN_KEYBOARD)
             items = get_symbol_list()
+            
             if items:
                 found = None
                 for it in items:
@@ -147,12 +171,11 @@ try:
                 else:
                     send(chat_id, f"❌ نماد «{text}» پیدا نشد. دقت کن که اسم رو دقیقاً مثل لیست بنویسی.", MAIN_KEYBOARD)
             else:
-                send(chat_id, "❌ خطا در دریافت داده‌ها از بورس.", MAIN_KEYBOARD)
+                send(chat_id, "❌ خطا در دریافت داده‌ها. احتمالاً پروکسی‌ها قطع شده‌اند. لطفاً دوباره امتحان کنید.", MAIN_KEYBOARD)
             
-            awaiting_scan = False # پایان حالت اسکن
+            awaiting_scan = False 
             continue
 
-        # پردازش دستورات منو
         if text == '/start':
             send(chat_id, "سلام 👋\nاز منوی پایین یک گزینه انتخاب کن:", MAIN_KEYBOARD)
             
@@ -170,7 +193,7 @@ try:
                 msg_text = format_symbol_list(items)
                 send(chat_id, msg_text, MAIN_KEYBOARD)
             else:
-                send(chat_id, "❌ دریافت لیست ناموفق بود.", MAIN_KEYBOARD)
+                send(chat_id, "❌ دریافت لیست ناموفق بود. ممکن است لحظه‌ای قطعی شبکه باشد.", MAIN_KEYBOARD)
         else:
             send(chat_id, "از منوی پایین انتخاب کن:", MAIN_KEYBOARD)
 
