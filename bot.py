@@ -1,6 +1,7 @@
 import requests
 import json
 import os
+import time
 
 # ===== تنظیمات خودت =====
 TOKEN = "8956012435:AAG8yJA3E6PouLB0hmmw7rpXzAX_flnvqRc"
@@ -10,8 +11,10 @@ BASE = f"https://api.telegram.org/bot{TOKEN}"
 STATE_FILE = "state.json"
 
 HEADERS = {
-    'User-Agent': 'Mozilla/5.0 (Linux; Android 10) AppleWebKit/537.36 '
-                  '(KHTML, like Gecko) Chrome/120.0 Mobile Safari/537.36'
+    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 '
+                  '(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+    'Accept': 'application/json, text/plain, */*',
+    'Accept-Language': 'en-US,en;q=0.9,fa;q=0.8',
 }
 
 def load_state():
@@ -45,7 +48,7 @@ MAIN_KEYBOARD = {
     'is_persistent': True
 }
 
-def get_symbol_list():
+def get_symbol_list(retries=3):
     url = "https://cdn.tsetmc.com/api/ClosingPrice/GetMarketWatch"
     params = {
         'market': 0,
@@ -56,20 +59,24 @@ def get_symbol_list():
         'hEven': 0,
         'RefID': 0
     }
-    try:
-        r = requests.get(url, params=params, headers=HEADERS, timeout=15)
-        if r.status_code != 200:
-            print("خطای HTTP:", r.status_code)
-            return None
-        data = r.json()
-        items = data.get('marketwatch') or data.get('marketWatch')
-        if not items:
-            print("پاسخ خالی:", str(data)[:200])
-            return None
-        return items
-    except Exception as e:
-        print("خطا در دریافت لیست:", e)
-        return None
+    for attempt in range(retries):
+        try:
+            r = requests.get(url, params=params, headers=HEADERS, timeout=20)
+            if r.status_code != 200:
+                print(f"تلاش {attempt+1}: خطای HTTP {r.status_code}")
+                time.sleep(2)
+                continue
+            data = r.json()
+            items = data.get('marketwatch') or data.get('marketWatch')
+            if not items:
+                print(f"تلاش {attempt+1}: پاسخ خالی")
+                time.sleep(2)
+                continue
+            return items
+        except Exception as e:
+            print(f"تلاش {attempt+1}: خطا - {e}")
+            time.sleep(2)
+    return None
 
 def format_symbol_list(items, limit=40):
     if not items:
@@ -90,7 +97,6 @@ def format_symbol_list(items, limit=40):
 # ---------- اجرای اصلی ----------
 state = load_state()
 
-# اگر اولین بار است، فقط آپدیت‌های قدیمی را نادیده بگیر و offset را ذخیره کن
 if state is None:
     print("اولین اجرا: دریافت offset اولیه...")
     try:
