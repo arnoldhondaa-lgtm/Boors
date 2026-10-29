@@ -11,21 +11,6 @@ TOKEN = "8956012435:AAG8yJA3E6PouLB0hmmw7rpXzAX_flnvqRc"
 BASE = f"https://api.telegram.org/bot{TOKEN}"
 STATE_FILE = "state.json"
 
-IRAN_PROXIES = [
-    "http://46.209.30.11:8080",
-    "http://45.131.4.93:80",
-    "http://45.131.4.91:80",
-    "http://81.12.28.35:3128",
-    "http://185.88.177.40:80",
-    "http://46.245.69.173:8080",
-    "http://45.131.4.67:80",
-    "http://185.95.152.38:8080",
-    "http://31.14.124.45:8080",
-    "http://195.181.40.34:8080",
-    "http://185.118.153.110:8080",
-    "http://79.175.188.203:443",
-]
-
 HEADERS = {
     'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 '
                   '(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
@@ -64,7 +49,27 @@ MAIN_KEYBOARD = {
     'is_persistent': True
 }
 
-def get_symbol_list(retries=5):
+def get_fresh_proxies():
+    """دریافت پروکسی‌های زنده ایرانی از یک منبع آنلاین"""
+    try:
+        # دریافت پروکسی‌های HTTP از ایران
+        url = "https://api.proxyscrape.com/v2/?request=displayproxies&protocol=http&timeout=5000&country=IR&ssl=all&anonymity=all"
+        r = requests.get(url, timeout=10)
+        if r.status_code == 200:
+            proxies = [f"http://{p.strip()}" for p in r.text.split("\n") if p.strip()]
+            if proxies:
+                print(f"{len(proxies)} پروکسی جدید پیدا شد.")
+                return proxies
+    except Exception as e:
+        print("خطا در دریافت پروکسی‌های آنلاین:", e)
+    
+    # اگر اینترنت قطع بود یا سایت جواب نداد، از لیست پیش‌فرض استفاده کن
+    return [
+        "http://46.209.30.11:8080", "http://45.131.4.93:80",
+        "http://45.131.4.91:80", "http://81.12.28.35:3128",
+    ]
+
+def get_symbol_list(retries=10):
     url = "https://cdn.tsetmc.com/api/ClosingPrice/GetMarketWatch"
     params = {
         'market': 0,
@@ -75,48 +80,27 @@ def get_symbol_list(retries=5):
         'hEven': 0,
         'RefID': 0
     }
-    proxies_to_try = IRAN_PROXIES if IRAN_PROXIES else [None]
     
-    for attempt in range(retries):
-        proxy_url = random.choice(proxies_to_try)
+    proxies_to_try = get_fresh_proxies()
+    
+    for attempt in range(min(retries, len(proxies_to_try))):
+        proxy_url = proxies_to_try[attempt]
         proxies = {"http": proxy_url, "https": proxy_url} if proxy_url else None
+        
         try:
-            r = requests.get(url, params=params, headers=HEADERS, proxies=proxies, timeout=20)
+            print(f"تلاش {attempt+1} با پروکسی: {proxy_url}")
+            r = requests.get(url, params=params, headers=HEADERS, proxies=proxies, timeout=15)
             if r.status_code != 200:
                 continue
             data = r.json()
             items = data.get('marketwatch') or data.get('marketWatch')
             if items:
+                print("موفق! لیست دریافت شد.")
                 return items
         except Exception as e:
-            print(f"تلاش {attempt+1} با پروکسی {proxy_url}: {e}")
-            time.sleep(1)
+            print(f"خطا: {e}")
+            continue
     return None
-
-def format_symbol_list(items, limit=40):
-    if not items:
-        return None
-    lines = []
-    for it in items[:limit]:
-        # تلاش برای پیدا کردن اسم نماد با کلیدهای مختلف
-        symbol = it.get('lVal18AFC') or it.get('lval18AFC') or it.get('symbol')
-        name = it.get('lVal30') or it.get('lval30') or it.get('name')
-        
-        # اگر اسم پیدا نشد، از کد استفاده کن
-        if not symbol:
-            symbol = it.get('insCode', 'نامشخص')
-            
-        if name:
-            lines.append(f"• {symbol}  —  {name}")
-        else:
-            lines.append(f"• {symbol}")
-            
-    if not lines:
-        return None
-    header = f"📋 لیست نمادها (نمایش {len(lines)} از {len(items)} مورد)\n\n"
-    footer = "\n\n(نمایش محدود شده است؛ در مراحل بعد جستجو اضافه می‌شود.)"
-    return header + "\n".join(lines) + footer
-
 
 # ---------- اجرای اصلی ----------
 state = load_state()
@@ -127,11 +111,9 @@ if state is None:
         r = requests.get(f"{BASE}/getUpdates", timeout=15)
         updates = r.json().get('result', [])
         offset = (max(u['update_id'] for u in updates) + 1) if updates else 0
-    except Exception as e:
-        print("خطا:", e)
+    except Exception:
         offset = 0
     save_state({"offset": offset})
-    print("offset اولیه ذخیره شد:", offset)
     exit(0)
 
 offset = state.get("offset", 0)
@@ -158,19 +140,28 @@ try:
             send(chat_id, "بخش اسکن هنوز آماده نیست.", MAIN_KEYBOARD)
             
         elif text == '📋 لیست نمادها':
-            send(chat_id, "⏳ در حال دریافت لیست نمادها...", MAIN_KEYBOARD)
+            send(chat_id, "⏳ در حال دریافت لیست نمادها (در حال تست پروکسی‌های جدید)...", MAIN_KEYBOARD)
             items = get_symbol_list()
+            
             if items:
-                msg_text = format_symbol_list(items)
-                if msg_text:
-                    send(chat_id, msg_text, MAIN_KEYBOARD)
-                    # ارسال یک نمونه از داده خام برای دیباگ (فقط برای بررسی)
-                    debug_sample = str(items[0])[:300]
-                    send(chat_id, f"🔍 نمونه داده خام:\n{debug_sample}", MAIN_KEYBOARD)
-                else:
-                    send(chat_id, "لیست دریافت شد اما نام نمادها استخراج نشد.", MAIN_KEYBOARD)
+                # ارسال لیست (فقط ۱۵ نماد اول برای اینکه پیام طولانی نشود)
+                lines = []
+                for it in items[:15]:
+                    symbol = it.get('lVal18AFC') or it.get('lval18AFC') or it.get('symbol') or it.get('insCode')
+                    name = it.get('lVal30') or it.get('lval30') or it.get('name') or ''
+                    lines.append(f"• {symbol} — {name}")
+                
+                msg_text = "📋 لیست نمادها (۱۵ مورد اول):\n\n" + "\n".join(lines)
+                send(chat_id, msg_text, MAIN_KEYBOARD)
+                
+                # ارسال اطلاعات دیباگ برای پیدا کردن اسم فیلدها
+                first_item = items[0]
+                debug_msg = f"🔍 کلیدهای موجود در داده:\n{list(first_item.keys())}\n\n"
+                debug_msg += f"📦 نمونه داده کامل:\n{json.dumps(first_item, ensure_ascii=False)}"
+                send(chat_id, debug_msg[:4000], MAIN_KEYBOARD)
+                
             else:
-                send(chat_id, "❌ دریافت لیست ناموفق بود. لطفاً دوباره تلاش کنید.", MAIN_KEYBOARD)
+                send(chat_id, "❌ دریافت لیست ناموفق بود. تمام پروکسی‌ها از کار افتاده‌اند. لطفاً چند دقیقه دیگر دوباره تلاش کنید.", MAIN_KEYBOARD)
         else:
             send(chat_id, "از منوی پایین انتخاب کن:", MAIN_KEYBOARD)
 
