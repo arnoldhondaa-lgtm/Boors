@@ -3,6 +3,7 @@ import json
 import os
 import time
 import random
+from urllib.parse import quote, urlencode
 
 # ===== تنظیمات خودت =====
 TOKEN = "8956012435:AAG8yJA3E6PouLB0hmmw7rpXzAX_flnvqRc"
@@ -48,80 +49,84 @@ MAIN_KEYBOARD = {
     'is_persistent': True
 }
 
-def get_fresh_proxies():
-    proxies_list = []
+# ====== موتور دریافت داده با ۳ لایه دفاعی ======
+def safe_get_json(url, params=None):
+    # لایه ۱: تلاش مستقیم
     try:
-        # گرفتن لیست از منبع اول
-        url = "https://api.proxyscrape.com/v2/?request=displayproxies&protocol=http&timeout=5000&country=IR&ssl=all&anonymity=all"
-        r = requests.get(url, timeout=10)
+        r = requests.get(url, params=params, headers=HEADERS, timeout=10)
         if r.status_code == 200:
-            proxies_list.extend([f"http://{p.strip()}" for p in r.text.split("\n") if p.strip()])
-            
-        # گرفتن لیست از منبع دوم برای اطمینان بیشتر
-        url2 = "https://raw.githubusercontent.com/TheSpeedX/PROXY-List/master/http.txt"
-        r2 = requests.get(url2, timeout=10)
-        if r2.status_code == 200:
-            # فقط چندتایی از این لیست برمیداریم که خیلی طولانی نشه
-            proxies_list.extend([f"http://{p.strip()}" for p in r2.text.split("\n")[:100] if p.strip()])
-            
-    except Exception as e:
-        print("خطا در دریافت پروکسی‌های آنلاین:", e)
-    
-    # لیست پیش‌فرض در صورتی که اینترنت قطع باشد
-    if not proxies_list:
-        proxies_list = [
-            "http://46.209.30.11:8080", "http://45.131.4.93:80",
-            "http://45.131.4.91:80", "http://81.12.28.35:3128",
-        ]
-        
-    # مخلوط کردن لیست تا هر بار ترتیب متفاوتی تست شود
-    random.shuffle(proxies_list)
-    return proxies_list
+            return r.json()
+    except Exception:
+        pass
 
-def get_symbol_list(retries=15):
-    url = "https://cdn.tsetmc.com/api/ClosingPrice/GetMarketWatch"
-    params = {
-        'market': 0,
-        'paperTypes[0]': 1, 'paperTypes[1]': 2, 'paperTypes[2]': 3,
-        'paperTypes[3]': 4, 'paperTypes[4]': 5, 'paperTypes[5]': 6,
-        'paperTypes[6]': 7, 'paperTypes[7]': 8, 'paperTypes[8]': 9,
-        'withBestLimits': 'false', 'hEven': 0, 'RefID': 0
-    }
-    
-    proxies_to_try = get_fresh_proxies()
-    # در نهایت یک بار هم بدون پروکسی (اتصال مستقیم) تست میکنیم
-    proxies_to_try.append(None) 
-    
-    for attempt in range(min(retries, len(proxies_to_try))):
-        proxy_url = proxies_to_try[attempt]
-        proxies = {"http": proxy_url, "https": proxy_url} if proxy_url else None
-        
+    full_url = url
+    if params:
+        full_url += "?" + urlencode(params)
+    quoted_url = quote(full_url, safe='')
+
+    # لایه ۲: پروکسی‌های CORS (سرورهای واسط خارجی)
+    cors_proxies = [
+        f"https://api.allorigins.win/raw?url={quoted_url}",
+        f"https://api.codetabs.com/v1/proxy?quest={quoted_url}"
+    ]
+    for proxy_url in cors_proxies:
         try:
-            print(f"تلاش {attempt+1} با پروکسی: {proxy_url}")
-            r = requests.get(url, params=params, headers=HEADERS, proxies=proxies, timeout=10)
+            r = requests.get(proxy_url, timeout=15)
             if r.status_code == 200:
-                data = r.json()
-                items = data.get('marketwatch') or data.get('marketWatch')
-                if items:
-                    print("موفق! لیست دریافت شد.")
-                    return items
+                return r.json()
         except Exception:
-            continue
-            
+            pass
+
+    # لایه ۳: پروکسی‌های ایرانی (فقط برای درخواست‌های کوچک)
+    try:
+        proxy_api = "https://api.proxyscrape.com/v2/?request=displayproxies&protocol=http&timeout=5000&country=IR&ssl=all&anonymity=all"
+        r = requests.get(proxy_api, timeout=5)
+        if r.status_code == 200:
+            proxies = [f"http://{p.strip()}" for p in r.text.split("\n") if p.strip()]
+            random.shuffle(proxies)
+            for p in proxies[:5]: # فقط ۵ تا رو سریع تست میکنیم
+                try:
+                    r_data = requests.get(url, params=params, headers=HEADERS, 
+                                          proxies={"http": p, "https": p}, timeout=8)
+                    if r_data.status_code == 200:
+                        return r_data.json()
+                except Exception:
+                    continue
+    except Exception:
+        pass
+
     return None
 
-def format_symbol_list(items, limit=30):
-    if not items:
-        return None
-    lines = []
-    for it in items[:limit]:
-        symbol = it.get('lva', 'نامشخص')
-        name = it.get('lvc', '')
-        lines.append(f"• {symbol} — {name}")
-    return f"📋 لیست نمادها (نمایش {len(lines)} از {len(items)} مورد)\n\n" + "\n".join(lines)
+def search_and_get_price(query):
+    # ۱. جستجوی نماد (درخواست بسیار سبک)
+    search_url = f"https://cdn.tsetmc.com/api/Instrument/GetInstrumentSearch/{quote(query)}"
+    search_data = safe_get_json(search_url)
+    
+    if not search_data or not search_data.get('instrumentSearch'):
+        return None, "نماد پیدا نشد یا خطای شبکه."
+    
+    # پیدا کردن دقیق‌ترین تطابق
+    items = search_data['instrumentSearch']
+    exact_match = None
+    for item in items:
+        if item.get('lVal18AFC', '').strip() == query.strip():
+            exact_match = item
+            break
+    if not exact_match:
+        exact_match = items[0] # اگر دقیق نبود، اولین نتیجه رو بردار
+        
+    ins_code = exact_match.get('insCode')
+    
+    # ۲. دریافت قیمت لحظه‌ای (درخواست بسیار سبک)
+    price_url = f"https://cdn.tsetmc.com/api/ClosingPrice/GetClosingPriceInfo/{ins_code}"
+    price_data = safe_get_json(price_url)
+    
+    if not price_data or not price_data.get('closingPriceInfo'):
+        return None, "خطا در دریافت قیمت لحظه‌ای."
+        
+    return (exact_match, price_data['closingPriceInfo']), None
 
-
-# ---------- اجرای اصلی ----------
+# ========== اجرای اصلی ==========
 state = load_state()
 offset = state.get("offset", 0)
 awaiting_scan = state.get("awaiting_scan", False)
@@ -150,28 +155,21 @@ try:
 
         if awaiting_scan:
             send(chat_id, f"⏳ در حال جستجوی نماد «{text}»...", MAIN_KEYBOARD)
-            items = get_symbol_list()
             
-            if items:
-                found = None
-                for it in items:
-                    if it.get('lva', '').strip() == text:
-                        found = it
-                        break
-                
-                if found:
-                    msg_text = f"📊 اطلاعات نماد: {found.get('lva')}\n"
-                    msg_text += f"🏢 {found.get('lvc')}\n\n"
-                    msg_text += f"💰 قیمت آخرین معامله: {found.get('pdv', 0):,} ریال\n"
-                    msg_text += f"🔒 قیمت پایانی: {found.get('pClosing', 0):,} ریال\n"
-                    msg_text += f"📉 قیمت دیروز: {found.get('py', 0):,} ریال\n"
-                    msg_text += f"📈 بیشترین: {found.get('pmx', 0):,} | کمترین: {found.get('pmn', 0):,}\n"
-                    msg_text += f"📦 حجم معاملات: {found.get('qtj', 0):,}"
-                    send(chat_id, msg_text, MAIN_KEYBOARD)
-                else:
-                    send(chat_id, f"❌ نماد «{text}» پیدا نشد. دقت کن که اسم رو دقیقاً مثل لیست بنویسی.", MAIN_KEYBOARD)
+            result, error = search_and_get_price(text)
+            
+            if result:
+                info, price = result
+                msg_text = f"📊 نماد: {info.get('lVal18AFC')}\n"
+                msg_text += f"🏢 {info.get('lVal30')}\n\n"
+                msg_text += f"💰 آخرین معامله: {price.get('pDrCotVal', 0):,} ریال\n"
+                msg_text += f"🔒 قیمت پایانی: {price.get('pClosing', 0):,} ریال\n"
+                msg_text += f"📈 بیشترین: {price.get('priceMax', 0):,}\n"
+                msg_text += f"📉 کمترین: {price.get('priceMin', 0):,}\n"
+                msg_text += f"📦 حجم معاملات: {price.get('qTotTran5J', 0):,}"
+                send(chat_id, msg_text, MAIN_KEYBOARD)
             else:
-                send(chat_id, "❌ خطا در دریافت داده‌ها. احتمالاً پروکسی‌ها قطع شده‌اند. لطفاً دوباره امتحان کنید.", MAIN_KEYBOARD)
+                send(chat_id, f"❌ {error}\nدقت کن اسم رو دقیق بنویسی.", MAIN_KEYBOARD)
             
             awaiting_scan = False 
             continue
@@ -187,13 +185,23 @@ try:
             awaiting_scan = True
             
         elif text == '📋 لیست نمادها':
-            send(chat_id, "⏳ در حال دریافت لیست نمادها...", MAIN_KEYBOARD)
-            items = get_symbol_list()
-            if items:
-                msg_text = format_symbol_list(items)
-                send(chat_id, msg_text, MAIN_KEYBOARD)
+            send(chat_id, "⏳ در حال دریافت لیست نمادها (ممکن است کمی طول بکشد)...", MAIN_KEYBOARD)
+            # برای لیست کامل، همان متد قبلی را با پارامترهای سبک‌تر صدا می‌زنیم
+            list_url = "https://cdn.tsetmc.com/api/ClosingPrice/GetMarketWatch"
+            params = {'market': 0, 'paperTypes[0]': 1, 'paperTypes[1]': 2, 'paperTypes[2]': 3, 'withBestLimits': 'false', 'hEven': 0}
+            data = safe_get_json(list_url, params=params)
+            
+            if data:
+                items = data.get('marketwatch') or data.get('marketWatch')
+                if items:
+                    lines = []
+                    for it in items[:20]: # فقط ۲۰ مورد اول برای اینکه پیام خیلی طولانی نشه
+                        lines.append(f"• {it.get('lva')} — {it.get('lvc')}")
+                    send(chat_id, "📋 ۲۰ نماد اول بازار:\n\n" + "\n".join(lines), MAIN_KEYBOARD)
+                else:
+                    send(chat_id, "❌ داده‌ای دریافت نشد.", MAIN_KEYBOARD)
             else:
-                send(chat_id, "❌ دریافت لیست ناموفق بود. ممکن است لحظه‌ای قطعی شبکه باشد.", MAIN_KEYBOARD)
+                send(chat_id, "❌ سرورهای بورس پاسخ ندادند. لطفاً بعداً تلاش کنید.", MAIN_KEYBOARD)
         else:
             send(chat_id, "از منوی پایین انتخاب کن:", MAIN_KEYBOARD)
 
