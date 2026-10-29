@@ -18,7 +18,6 @@ HEADERS = {
     'Accept': 'application/json, text/plain, */*',
 }
 
-# کیبوردهای ربات
 MAIN_KEYBOARD = {
     'keyboard': [
         [{'text': '📊 اسکن'}, {'text': '📋 لیست نمادها'}],
@@ -59,18 +58,18 @@ def send(chat_id, text, keyboard=None):
     except Exception as e:
         print("خطا در ارسال:", e)
 
-# ====== موتور دریافت داده ======
+# ====== موتور دریافت داده با ۴ مسیر پشتیبان ======
 def fetch_json(url, params=None):
+    full_url = url
+    if params:
+        full_url += "?" + urlencode(params)
+    
+    # مسیر ۱: r.jina.ai
     try:
-        full_url = url
-        if params:
-            full_url += "?" + urlencode(params)
         jina_url = f"https://r.jina.ai/{full_url}"
         r = requests.get(jina_url, headers={'Accept': 'application/json'}, timeout=15)
         if r.status_code == 200:
             text = r.text.strip()
-            if text.startswith('{') or text.startswith('['):
-                return json.loads(text)
             start = text.find('{')
             end = text.rfind('}')
             if start != -1 and end != -1:
@@ -78,51 +77,72 @@ def fetch_json(url, params=None):
     except Exception:
         pass
 
+    # مسیر ۲: اتصال مستقیم
     try:
         r = requests.get(url, params=params, headers=HEADERS, timeout=10)
         if r.status_code == 200:
             return r.json()
     except Exception:
         pass
+        
+    # مسیر ۳: AllOrigins
+    quoted_url = quote(full_url, safe='')
+    try:
+        r = requests.get(f"https://api.allorigins.win/raw?url={quoted_url}", timeout=15)
+        if r.status_code == 200:
+            return r.json()
+    except Exception:
+        pass
+
+    # مسیر ۴: CodeTabs
+    try:
+        r = requests.get(f"https://api.codetabs.com/v1/proxy?quest={quoted_url}", timeout=15)
+        if r.status_code == 200:
+            return r.json()
+    except Exception:
+        pass
+
     return None
 
 def get_symbol_info_and_price(query):
-    search_url = f"https://cdn.tsetmc.com/api/Instrument/GetInstrumentSearch/{quote(query)}"
-    search_data = fetch_json(search_url)
-    if not search_data or 'instrumentSearch' not in search_data:
-        return None, None
-    
-    items = search_data['instrumentSearch']
-    if not items:
-        return None, None
-    
-    exact_match = None
-    for item in items:
-        if item.get('lVal18AFC', '').strip().replace('ي', 'ی').replace('ك', 'ک') == query.strip().replace('ي', 'ی').replace('ك', 'ک'):
-            exact_match = item
-            break
-    if not exact_match:
-        exact_match = items[0]
+    # تلاش تا ۳ بار برای گرفتن اطلاعات
+    for _ in range(3):
+        search_url = f"https://cdn.tsetmc.com/api/Instrument/GetInstrumentSearch/{quote(query, safe='')}"
+        search_data = fetch_json(search_url)
         
-    ins_code = exact_match.get('insCode')
-    price_url = f"https://cdn.tsetmc.com/api/ClosingPrice/GetClosingPriceInfo/{ins_code}"
-    price_data = fetch_json(price_url)
-    if not price_data or 'closingPriceInfo' not in price_data:
-        return None, None
+        if search_data and 'instrumentSearch' in search_data:
+            items = search_data['instrumentSearch']
+            if not items:
+                return None, None # قطعاً نماد اشتباه است
+            
+            exact_match = None
+            for item in items:
+                if item.get('lVal18AFC', '').strip().replace('ي', 'ی').replace('ك', 'ک') == query.strip().replace('ي', 'ی').replace('ك', 'ک'):
+                    exact_match = item
+                    break
+            if not exact_match:
+                exact_match = items[0]
+                
+            ins_code = exact_match.get('insCode')
+            price_url = f"https://cdn.tsetmc.com/api/ClosingPrice/GetClosingPriceInfo/{ins_code}"
+            price_data = fetch_json(price_url)
+            if price_data and 'closingPriceInfo' in price_data:
+                return exact_match, price_data['closingPriceInfo']
         
-    return exact_match, price_data['closingPriceInfo']
+        time.sleep(2) # کمی صبر و تلاش مجدد در صورت خطای شبکه
+        
+    return None, None
 
 # ========== اجرای اصلی ==========
 state = load_state()
 offset = state.get("offset", 0)
 alerts = state.get("alerts", [])
-# حالت‌های انتظار
+
 awaiting_scan = state.get("awaiting_scan", False)
 awaiting_alert_sym = state.get("awaiting_alert_sym", False)
 awaiting_alert_price = state.get("awaiting_alert_price", False)
 temp_alert_sym = state.get("temp_alert_sym", "")
 
-# اگر اولین اجراست
 if offset == 0 and not os.path.exists(STATE_FILE):
     try:
         r = requests.get(f"{BASE}/getUpdates", timeout=15)
@@ -154,11 +174,9 @@ if alerts:
                 msg += f"قیمت فعلی: {current_price:,} ریال\n"
                 msg += f"این هشدار از لیست شما حذف شد."
                 send(chat_id, msg, MAIN_KEYBOARD)
-                # هشدار مصرف شده و به لیست باقی‌مانده اضافه نمی‌شود
             else:
                 remaining_alerts.append(alert)
         else:
-            # اگر در دریافت قیمت خطا داد، هشدار را نگه میداریم برای دفعه بعد
             remaining_alerts.append(alert)
             
     if len(remaining_alerts) != len(alerts):
@@ -189,11 +207,12 @@ try:
                 msg_text += f"🔒 قیمت پایانی: {price.get('pClosing', 0):,} ریال"
                 send(chat_id, msg_text, MAIN_KEYBOARD)
             else:
-                send(chat_id, f"❌ نماد پیدا نشد یا خطای شبکه.", MAIN_KEYBOARD)
+                send(chat_id, f"❌ خطا در ارتباط با سرور بورس یا نماد اشتباه است. (دوباره تلاش کنید)", MAIN_KEYBOARD)
             awaiting_scan = False 
             continue
 
         if awaiting_alert_sym:
+            send(chat_id, f"⏳ در حال بررسی نماد «{text}»...", MAIN_KEYBOARD)
             info, price = get_symbol_info_and_price(text)
             if info:
                 temp_alert_sym = info.get('lVal18AFC')
@@ -201,7 +220,7 @@ try:
                 awaiting_alert_sym = False
                 awaiting_alert_price = True
             else:
-                send(chat_id, "❌ نماد پیدا نشد. نام نماد را دقیق بنویسید:", MAIN_KEYBOARD)
+                send(chat_id, "❌ ارتباط با سرور بورس برقرار نشد یا نماد اشتباه است.\nدوباره نام نماد را بفرستید:", MAIN_KEYBOARD)
             continue
 
         if awaiting_alert_price:
@@ -260,7 +279,6 @@ try:
         else:
             send(chat_id, "از منوی پایین انتخاب کن:", MAIN_KEYBOARD)
 
-    # ذخیره وضعیت نهایی
     state.update({
         "offset": offset, 
         "alerts": alerts,
