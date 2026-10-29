@@ -49,22 +49,41 @@ MAIN_KEYBOARD = {
     'is_persistent': True
 }
 
-# ====== موتور دریافت داده با ۳ لایه دفاعی ======
-def safe_get_json(url, params=None):
-    # لایه ۱: تلاش مستقیم
+# ====== موتور دریافت داده با اولویت‌دهی هوشمند ======
+def fetch_json(url, params=None):
+    # ۱. اولویت اول: استفاده از r.jina.ai (پروکسی پایدار برای APIهای خارجی)
+    try:
+        full_url = url
+        if params:
+            full_url += "?" + urlencode(params)
+        jina_url = f"https://r.jina.ai/{full_url}"
+        r = requests.get(jina_url, headers={'Accept': 'application/json'}, timeout=15)
+        if r.status_code == 200:
+            # jina ممکن است متن اضافی برگرداند، سعی میکنیم JSON را استخراج کنیم
+            text = r.text.strip()
+            if text.startswith('{') or text.startswith('['):
+                return json.loads(text)
+            # اگر JSON نبود، شاید داخل متن باشد
+            start = text.find('{')
+            end = text.rfind('}')
+            if start != -1 and end != -1:
+                return json.loads(text[start:end+1])
+    except Exception as e:
+        print("Jina failed:", e)
+
+    # ۲. اولویت دوم: اتصال مستقیم (شاید IP گیت‌هاب در آن لحظه مسدود نباشد)
     try:
         r = requests.get(url, params=params, headers=HEADERS, timeout=10)
         if r.status_code == 200:
             return r.json()
-    except Exception:
-        pass
+    except Exception as e:
+        print("Direct failed:", e)
 
+    # ۳. اولویت سوم: پروکسی‌های CORS
     full_url = url
     if params:
         full_url += "?" + urlencode(params)
     quoted_url = quote(full_url, safe='')
-
-    # لایه ۲: پروکسی‌های CORS (سرورهای واسط خارجی)
     cors_proxies = [
         f"https://api.allorigins.win/raw?url={quoted_url}",
         f"https://api.codetabs.com/v1/proxy?quest={quoted_url}"
@@ -77,14 +96,14 @@ def safe_get_json(url, params=None):
         except Exception:
             pass
 
-    # لایه ۳: پروکسی‌های ایرانی (فقط برای درخواست‌های کوچک)
+    # ۴. اولویت چهارم: پروکسی‌های ایرانی
     try:
         proxy_api = "https://api.proxyscrape.com/v2/?request=displayproxies&protocol=http&timeout=5000&country=IR&ssl=all&anonymity=all"
         r = requests.get(proxy_api, timeout=5)
         if r.status_code == 200:
             proxies = [f"http://{p.strip()}" for p in r.text.split("\n") if p.strip()]
             random.shuffle(proxies)
-            for p in proxies[:5]: # فقط ۵ تا رو سریع تست میکنیم
+            for p in proxies[:3]: 
                 try:
                     r_data = requests.get(url, params=params, headers=HEADERS, 
                                           proxies={"http": p, "https": p}, timeout=8)
@@ -98,31 +117,40 @@ def safe_get_json(url, params=None):
     return None
 
 def search_and_get_price(query):
-    # ۱. جستجوی نماد (درخواست بسیار سبک)
+    # ۱. جستجوی نماد
     search_url = f"https://cdn.tsetmc.com/api/Instrument/GetInstrumentSearch/{quote(query)}"
-    search_data = safe_get_json(search_url)
+    search_data = fetch_json(search_url)
     
-    if not search_data or not search_data.get('instrumentSearch'):
-        return None, "نماد پیدا نشد یا خطای شبکه."
+    if not search_data or 'instrumentSearch' not in search_data:
+        return None, "سرور بورس پاسخ نداد یا نماد پیدا نشد."
+    
+    items = search_data['instrumentSearch']
+    if not items:
+        return None, f"نمادی با عبارت «{query}» یافت نشد."
     
     # پیدا کردن دقیق‌ترین تطابق
-    items = search_data['instrumentSearch']
     exact_match = None
     for item in items:
-        if item.get('lVal18AFC', '').strip() == query.strip():
+        # گاهی اوقات فاصله یا کاراکترهای اضافی وجود دارد، تمیز میکنیم
+        symbol_db = item.get('lVal18AFC', '').strip().replace('ي', 'ی').replace('ك', 'ک')
+        symbol_user = query.strip().replace('ي', 'ی').replace('ك', 'ک')
+        
+        if symbol_db == symbol_user:
             exact_match = item
             break
+            
     if not exact_match:
-        exact_match = items[0] # اگر دقیق نبود، اولین نتیجه رو بردار
+        # اگر دقیق نبود، اولین نتیجه رو بردار (بهترین تطابق تقریبی)
+        exact_match = items[0]
         
     ins_code = exact_match.get('insCode')
     
-    # ۲. دریافت قیمت لحظه‌ای (درخواست بسیار سبک)
+    # ۲. دریافت قیمت لحظه‌ای
     price_url = f"https://cdn.tsetmc.com/api/ClosingPrice/GetClosingPriceInfo/{ins_code}"
-    price_data = safe_get_json(price_url)
+    price_data = fetch_json(price_url)
     
-    if not price_data or not price_data.get('closingPriceInfo'):
-        return None, "خطا در دریافت قیمت لحظه‌ای."
+    if not price_data or 'closingPriceInfo' not in price_data:
+        return None, "اطلاعات قیمت برای این نماد در دسترس نیست."
         
     return (exact_match, price_data['closingPriceInfo']), None
 
@@ -169,7 +197,16 @@ try:
                 msg_text += f"📦 حجم معاملات: {price.get('qTotTran5J', 0):,}"
                 send(chat_id, msg_text, MAIN_KEYBOARD)
             else:
-                send(chat_id, f"❌ {error}\nدقت کن اسم رو دقیق بنویسی.", MAIN_KEYBOARD)
+                # اگر نماد پیدا نشد، چند پیشنهاد از نتایج جستجو را نشان بده (اگر وجود داشته باشد)
+                search_url = f"https://cdn.tsetmc.com/api/Instrument/GetInstrumentSearch/{quote(text)}"
+                search_data = fetch_json(search_url)
+                suggestions = ""
+                if search_data and search_data.get('instrumentSearch'):
+                    sugg_items = search_data['instrumentSearch'][:5]
+                    sugg_list = [f"• {s.get('lVal18AFC')}" for s in sugg_items]
+                    suggestions = "\n\n💡 نمادهای مشابه:\n" + "\n".join(sugg_list)
+                
+                send(chat_id, f"❌ {error}{suggestions}", MAIN_KEYBOARD)
             
             awaiting_scan = False 
             continue
@@ -181,21 +218,20 @@ try:
             send(chat_id, "بخش تنظیمات هنوز آماده نیست.", MAIN_KEYBOARD)
             
         elif text == '📊 اسکن':
-            send(chat_id, "🔍 لطفاً نام نماد مورد نظر را بنویسید (مثلاً: خودرو یا شپنا):", MAIN_KEYBOARD)
+            send(chat_id, "🔍 لطفاً نام نماد مورد نظر را بنویسید (مثلاً: خودرو یا ضهرم8024):", MAIN_KEYBOARD)
             awaiting_scan = True
             
         elif text == '📋 لیست نمادها':
-            send(chat_id, "⏳ در حال دریافت لیست نمادها (ممکن است کمی طول بکشد)...", MAIN_KEYBOARD)
-            # برای لیست کامل، همان متد قبلی را با پارامترهای سبک‌تر صدا می‌زنیم
+            send(chat_id, "⏳ در حال دریافت لیست نمادها...", MAIN_KEYBOARD)
             list_url = "https://cdn.tsetmc.com/api/ClosingPrice/GetMarketWatch"
             params = {'market': 0, 'paperTypes[0]': 1, 'paperTypes[1]': 2, 'paperTypes[2]': 3, 'withBestLimits': 'false', 'hEven': 0}
-            data = safe_get_json(list_url, params=params)
+            data = fetch_json(list_url, params=params)
             
             if data:
                 items = data.get('marketwatch') or data.get('marketWatch')
                 if items:
                     lines = []
-                    for it in items[:20]: # فقط ۲۰ مورد اول برای اینکه پیام خیلی طولانی نشه
+                    for it in items[:20]: 
                         lines.append(f"• {it.get('lva')} — {it.get('lvc')}")
                     send(chat_id, "📋 ۲۰ نماد اول بازار:\n\n" + "\n".join(lines), MAIN_KEYBOARD)
                 else:
